@@ -87,6 +87,7 @@ class Node:
     vx: float = 0.0
     vy: float = 0.0
     last_seen: float = 0.0
+    packet_count: int = 0
 
 
 @dataclass
@@ -412,14 +413,26 @@ class App:
         self.hover_edge = None
         self.payload_scroll = 0
         self.dns_enabled = False
+        self.save_feedback = ""
+        self.show_stats = False
+        self.total_packets = 0
+        self.total_bytes = 0
+        self.packet_timestamps = collections.deque()  # für packets/s
+        self.byte_timestamps = collections.deque()  # für bytes/s
+        self.node_packet_count = {}  # IP -> packet count
+        self.protocol_counts = collections.Counter()  # protokoll -> anzahl
         self.show_help = False
         self.filter_text = ""
         self.filter_proto = ""
+        self.port_filter = ""  # leer = alle Ports
         self.ip_filter = cfg.get("ip_filter", "ALL").upper()
         self.ip_alias = {}
         self.last_layout = time.monotonic()
         self.status = ""
         self.drawn_curves = []  # [(points, edge), ...] für Hover-Erkennung
+        self._rng = random.Random()  # Thread-sicheres RNG für Node-Positionen
+        self.mac_to_ip = {}  # MAC -> kanonische IP (erste bekannte)
+        self.ip_aliases = collections.defaultdict(set)  # IP -> weitere bekannte IPs dieses Hosts
         self.capture.start()
         
     def grouped_edges(self):
@@ -481,30 +494,46 @@ class App:
             f"{p.src} {p.dst} {p.protocol} {p.sport} {p.dport} {p.info}"
         ).lower():
             return
-        
-        now = p.ts
-        if self.filter_proto and p.protocol != self.filter_proto:
-            return
-        if self.filter_text and self.filter_text.lower() not in (
-            f"{p.src} {p.dst} {p.protocol} {p.sport} {p.dport} {p.info}"
-        ).lower():
-            return
 
-        for ip in (p.src, p.dst):
-            if ip not in self.nodes:
-                name = reverse_dns(ip, self.dns_cache) if self.dns_enabled else ip
-                self.nodes[ip] = Node(
-                    ip, ip, name,
-                    random.uniform(150, self.w - 150),
-                    random.uniform(130, self.h - 120),
+        if self.port_filter:
+            port_match = (self.port_filter in str(p.sport)) or (self.port_filter in str(p.dport))
+            if not port_match:
+                return
+
+        # MAC-basierte kanonische IP ermitteln.
+        def canonical_ip(ip, mac):
+            if not mac:
+                return ip
+            if mac in self.mac_to_ip:
+                return self.mac_to_ip[mac]
+            # Neue MAC → erste bekannte IP als kanonisch merken.
+            self.mac_to_ip[mac] = ip
+            return ip
+
+        c_src = canonical_ip(p.src, p.src_mac)
+        c_dst = canonical_ip(p.dst, p.dst_mac)
+
+        if c_src != p.src:
+            self.ip_aliases[c_src].add(p.src)
+        if c_dst != p.dst:
+            self.ip_aliases[c_dst].add(p.dst)
+
+        for ip, cip in ((p.src, c_src), (p.dst, c_dst)):
+            if cip not in self.nodes:
+                name = reverse_dns(cip, self.dns_cache) if self.dns_enabled else cip
+                self.nodes[cip] = Node(
+                    cip, cip, name,
+                    self._rng.uniform(150, self.w - 150),
+                    self._rng.uniform(130, self.h - 120),
                 )
-            self.nodes[ip].last_seen = now
+            self.nodes[cip].last_seen = now
+            self.nodes[cip].packet_count += 1
 
         # Direction + ports are part of the edge identity.
-        key = (p.src, p.dst, p.sport, p.dport, p.protocol)
+        key = (c_src, c_dst, p.sport, p.dport, p.protocol)
         if key not in self.edges:
             self.edges[key] = Edge(
-                key, p.src, p.dst, p.sport, p.dport, p.protocol
+                key, c_src, c_dst, p.sport, p.dport, p.protocol
             )
         e = self.edges[key]
         e.packets.append(p)
@@ -518,6 +547,15 @@ class App:
             self.node_ports[p.src].add(p.sport)
         if p.dport:
             self.node_ports[p.dst].add(p.dport)
+
+        # Statistiken aktualisieren.
+        self.total_packets += 1
+        self.total_bytes += p.length
+        self.packet_timestamps.append(now)
+        self.byte_timestamps.append((now, p.length))
+        self.protocol_counts[p.protocol] += 1
+        self.node_packet_count[p.src] = self.node_packet_count.get(p.src, 0) + 1
+        self.node_packet_count[p.dst] = self.node_packet_count.get(p.dst, 0) + 1
 
     def prune(self):
         retention = max(1, float(self.cfg["retention_seconds"]))
@@ -536,6 +574,11 @@ class App:
             if ip not in active_ips and self.nodes[ip].last_seen < cutoff:
                 del self.nodes[ip]
                 self.node_ports.pop(ip, None)
+                # Aliases und MAC-Mappings dieses Knotens entfernen.
+                for alias in self.ip_aliases.pop(ip, []):
+                    self.mac_to_ip.pop(alias, None)
+                # Auch das MAC-Mapping der kanonischen IP selbst entfernen.
+                self.mac_to_ip.pop(ip, None)
 
     def force_layout(self, dt):
         nodes = list(self.nodes.values())
@@ -583,6 +626,11 @@ class App:
         n = self.nodes[ip]
         return n.x, n.y
 
+    def node_radius(self, ip):
+        n = self.nodes[ip]
+        base = self.cfg["node_radius"]
+        return base * min(2.0, 1.0 + math.log1p(n.packet_count) / 10)
+
     def port_point(self, ip, other_ip, port, is_source):
         n = self.nodes[ip]
         dx = self.nodes[other_ip].x - n.x
@@ -594,7 +642,7 @@ class App:
         spread = min(math.radians(48), math.radians(8) * max(0, len(ports) - 1))
         offset = (idx - (len(ports) - 1) / 2) * (spread / max(1, len(ports) - 1)) if len(ports) > 1 else 0
         ang += offset
-        r = self.cfg["node_radius"]
+        r = self.node_radius(ip)
         return n.x + math.cos(ang) * r, n.y + math.sin(ang) * r, ang
 
     def edge_endpoints(self, e):
@@ -714,13 +762,14 @@ class App:
                 nx = -dy / length
                 ny = dx / length
 
-                radius = self.cfg["node_radius"]
+                r_src = self.node_radius(g["src"])
+                r_dst = self.node_radius(g["dst"])
 
-                x1 = src.x + dx / length * radius
-                y1 = src.y + dy / length * radius
+                x1 = src.x + dx / length * r_src
+                y1 = src.y + dy / length * r_src
 
-                x2 = dst.x - dx / length * radius
-                y2 = dst.y - dy / length * radius
+                x2 = dst.x - dx / length * r_dst
+                y2 = dst.y - dy / length * r_dst
 
                 # Mittig um die direkte Verbindung verteilen.
                 # Richtung 1 (umgekehrt) → in die entgegengesetzte
@@ -876,10 +925,15 @@ class App:
         for n in self.nodes.values():
             active = now - n.last_seen < 1.0
             col = (235, 240, 245) if active else (125, 132, 142)
-            pygame.draw.circle(self.screen, (23, 28, 36), (int(n.x), int(n.y)), self.cfg["node_radius"])
-            pygame.draw.circle(self.screen, col, (int(n.x), int(n.y)), self.cfg["node_radius"], 2)
+            # Radius steigt mit Traffic, aber max 2x.
+            base = self.cfg["node_radius"]
+            traffic_scale = min(2.0, 1.0 + math.log1p(n.packet_count) / 10)
+            radius = int(base * traffic_scale)
+            pygame.draw.circle(self.screen, (23, 28, 36), (int(n.x), int(n.y)), radius)
+            pygame.draw.circle(self.screen, col, (int(n.x), int(n.y)), radius, 2)
+            # Hostname nur anzeigen wenn DNS aktiviert und tatsächlich aufgelöst.
             label = n.ip
-            name = n.name if n.name != n.ip else ""
+            name = n.name if self.dns_enabled and n.name != n.ip else ""
             s = self.bold.render(label, True, (235, 240, 245))
             self.screen.blit(s, s.get_rect(center=(n.x, n.y - 7)))
             if name:
@@ -887,12 +941,15 @@ class App:
                 self.screen.blit(s2, s2.get_rect(center=(n.x, n.y + 12)))
 
         self.draw_hud()
+        self.draw_stats()
 
         if self.hover_edge:
             self.draw_payload_popup(self.hover_edge)
 
         if self.show_help:
             self.draw_help()
+
+        self.draw_legend()
 
         pygame.display.flip()
 
@@ -936,8 +993,9 @@ class App:
             f"Nodes: {len(self.nodes)}  Connections: {len(self.edges)}",
             f"Retention: {self.cfg['retention_seconds']} s",
             f"Filter: {self.filter_text or '*'}"
-            + (f"  proto={self.filter_proto}" if self.filter_proto else ""),
-            f"DNS: {'ON' if self.dns_enabled else 'OFF'}   IP: {self.ip_filter}   SPACE Pause   F Filter   P Proto   I IP   D DNS   C Clear   H Help   ESC Quit",
+            + (f"  proto={self.filter_proto}" if self.filter_proto else "")
+            + (f"  port={self.port_filter}" if self.port_filter else ""),
+            f"DNS: {'ON' if self.dns_enabled else 'OFF'}   IP: {self.ip_filter}   SPACE Pause   F Filter   P Proto   O Port   I IP   D DNS   S Stats   E Save   C Clear   H Help   ESC Quit",
         ]
 
         if self.paused:
@@ -961,42 +1019,54 @@ class App:
                 (12, 10 + len(left) * 17),
             )
 
-        # Protocol legend.
-        x = 12
+        # Screenshot-Speicher-Bestätigung.
+        if self.save_feedback:
+            self.screen.blit(
+                self.small.render(
+                    f"Saved: {self.save_feedback}",
+                    True,
+                    (100, 255, 100),
+                ),
+                (12, 10 + (len(left) + 1) * 17),
+            )
+            self.save_feedback = ""
+
+    def draw_legend(self):
+        # Zeigt alle definierten Protokoll-Farben aus DEFAULT_CONFIG.
+        colors = self.cfg.get("protocol_colors", {})
+        protos = sorted(colors.keys())
+
+        x = self.w - 12
         y = self.h - 25
 
-        protos = sorted({e.protocol for e in self.edges.values()})
+        # Von rechts nach links zeichnen.
+        for p in reversed(protos):
+            col = tuple(colors[p])
+            s = self.small.render(p, True, (195, 200, 210))
+            sw = s.get_width()
 
-        for p in protos:
-            col = self.color(p)
-
-            pygame.draw.circle(
+            pygame.draw.rect(
                 self.screen,
                 col,
-                (x + 5, y + 6),
-                5,
+                (x - sw - 18, y, 10, 14),
             )
-
-            s = self.small.render(
-                p,
-                True,
-                (195, 200, 210),
-            )
-   
-            self.screen.blit(s, (x + 14, y))
-            x += 18 + s.get_width()
+            self.screen.blit(s, (x - sw - 4, y))
+            x -= sw + 22
 
     def draw_help(self):
         lines = [
             "F = Textfilter setzen, ENTER anwenden, BACKSPACE löschen",
             "P = Protokollfilter (z.B. TCP, DNS, TLS), ENTER anwenden",
+            "O = Port-Filter (z.B. 443, 80), ENTER anwenden",
             "I = IP-Filter umschalten (ALL → IPv4 → IPv6 → ALL)",
             "D = DNS-Namensauflösung ein/aus",
+            "S = Statistik-Panel ein/aus",
+            "E = Screenshot speichern",
             "Maus über Verbindung = Paket-/Payload-Verlauf",
             "Mausrad über Payload = Verlauf scrollen",
             "SPACE = Capture pausieren, C = Ansicht leeren",
         ]
-        w, h = 570, 185
+        w, h = 570, 300
         x, y = (self.w - w) // 2, (self.h - h) // 2
         s = pygame.Surface((w, h), pygame.SRCALPHA)
         s.fill((8, 10, 14, 245))
@@ -1004,6 +1074,60 @@ class App:
         for i, line in enumerate(lines):
             s.blit(self.font.render(line, True, (230, 235, 240)), (18, 18 + i * 27))
         self.screen.blit(s, (x, y))
+
+    def draw_stats(self):
+        if not self.show_stats:
+            return
+
+        # Packets/s und Bytes/s berechnen (letzte Sekunde).
+        now = time.time()
+        cutoff = now - 1.0
+        while self.packet_timestamps and self.packet_timestamps[0] < cutoff:
+            self.packet_timestamps.popleft()
+        while self.byte_timestamps and self.byte_timestamps[0][0] < cutoff:
+            self.byte_timestamps.popleft()
+        pps = len(self.packet_timestamps)
+        bps = sum(b for _, b in self.byte_timestamps)
+
+        # Top 5 Talker.
+        top = sorted(self.node_packet_count.items(), key=lambda x: -x[1])[:5]
+
+        # Protokoll-Verteilung (Top 6).
+        proto_top = self.protocol_counts.most_common(6)
+
+        lines = [
+            f"Packets/s: {pps}",
+            f"Bytes/s: {bps:,}",
+            f"Total: {self.total_packets} / {self.total_bytes:,}",
+            "",
+        ]
+        if proto_top:
+            lines.append("Protokolle:")
+            for proto, cnt in proto_top:
+                bar_len = int(cnt / max(1, self.total_packets) * 20)
+                bar = "█" * bar_len
+                lines.append(f"  {proto:<6} {bar} {cnt}")
+
+        lines.append("")
+        lines.append("Top Talkers:")
+        for ip, cnt in top:
+            lines.append(f"  {ip}: {cnt}")
+
+        w, h = 260, 42 + len(lines) * 16
+        x, y = self.w - w - 12, 10
+
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        surf.fill((8, 10, 14, 220))
+        pygame.draw.rect(surf, (80, 90, 110), surf.get_rect(), 1)
+
+        for i, line in enumerate(lines):
+            col = (140, 200, 255) if i == 0 or i == 3 or i == (3 + 2 + len(proto_top) + 1) else (205, 212, 220)
+            surf.blit(
+                self.small.render(line, True, col),
+                (10, 8 + i * 16),
+            )
+
+        self.screen.blit(surf, (x, y))
 
     def color(self, protocol):
         if protocol in self.cfg["protocol_colors"]:
@@ -1045,19 +1169,37 @@ class App:
                     self.paused = not self.paused
                 elif ev.key == pygame.K_h:
                     self.show_help = not self.show_help
+                elif ev.key == pygame.K_s:
+                    self.show_stats = not self.show_stats
                 elif ev.key == pygame.K_c:
                     self.nodes.clear()
                     self.edges.clear()
                     self.node_ports.clear()
+                    self.total_packets = 0
+                    self.total_bytes = 0
+                    self.packet_timestamps.clear()
+                    self.port_filter = ""
+                    self.byte_timestamps.clear()
+                    self.node_packet_count.clear()
+                    self.protocol_counts.clear()
+                    self.mac_to_ip.clear()
+                    self.ip_aliases.clear()
                 elif ev.key == pygame.K_f:
                     self.filter_text = self.text_input("Filter")
                 elif ev.key == pygame.K_p:
                     self.filter_proto = self.text_input("Protokoll").upper()
+                elif ev.key == pygame.K_o:
+                    self.port_filter = self.text_input("Port")
                 elif ev.key == pygame.K_i:
                     opts = ["ALL", "IPV4", "IPV6"]
                     self.ip_filter = opts[(opts.index(self.ip_filter) + 1) % len(opts)]
                 elif ev.key == pygame.K_d:
                     self.dns_enabled = not self.dns_enabled
+                elif ev.key == pygame.K_e:
+                    import datetime
+                    fname = f"netmap_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    pygame.image.save(self.screen, fname)
+                    self.save_feedback = fname
             elif ev.type == pygame.MOUSEWHEEL and self.hover_edge:
                 self.payload_scroll = max(
                     -len(self.hover_edge.packets) + 1,

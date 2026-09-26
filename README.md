@@ -23,7 +23,7 @@ sudo .venv/bin/python netmap.py --config config.json
 
 ## Installation (requirements.txt)
 
-Falls du `requirements.txt` nutzen willst:
+Mit `requirements.txt`:
 
 ```bash
 pip install -r requirements.txt
@@ -38,8 +38,11 @@ pip install -r requirements.txt
 | H | Hilfe anzeigen |
 | F | Text-Filter |
 | P | Protokoll-Filter |
+| O | Port-Filter (z.B. 443, 80) |
 | I | IP-Version wechseln (ALL→IPv4→IPv6) |
 | D | DNS-Namensauflösung ein/aus |
+| S | Statistik-Panel ein/aus |
+| E | Screenshot speichern |
 | ESC | Beenden |
 
 Maus: Hover über Kante zeigt Payload-Daten, Scrollrad navigiert History.
