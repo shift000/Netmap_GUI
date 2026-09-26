@@ -1192,7 +1192,7 @@ class App:
         ts = self.font.render(title, True, (235, 240, 245))
         self.screen.blit(ts, ts.get_rect(center=(self.w // 2, 30)))
 
-        sub = self.small.render("Q = Back   |   Scroll with mouse wheel   |   Click to select", True, (140, 155, 170))
+        sub = self.small.render("Q = Back   |   Scroll with mouse wheel   |   Hover to show traffic details", True, (140, 155, 170))
         self.screen.blit(sub, sub.get_rect(center=(self.w // 2, 55)))
 
         # Collect all packets between these two nodes (both directions).
@@ -1325,6 +1325,7 @@ class App:
             row_bottom = y + row_h
             if col1 + 3 <= mx <= col2 - 3 and row_top <= my <= row_bottom:
                 self.detail_hover_packet = p
+                self._last_detail_packet = p  # Remember for arrow key scrolling
 
         # Draw hover popup for detail view only if hovering over a row
         if hasattr(self, 'detail_hover_packet') and self.detail_hover_packet:
@@ -1332,6 +1333,7 @@ class App:
             mx, my = pygame.mouse.get_pos()
             info = p.payload or p.info or ""
             info = " ".join(info.replace("\r", " ").replace("\n", " ").split())
+            info_len = len(info)
             lines = [
                 f"Time: {time.strftime('%H:%M:%S', time.localtime(p.ts))}.{int((p.ts % 1) * 1000):03d}",
                 f"Protocol: {p.protocol}",
@@ -1339,31 +1341,36 @@ class App:
                 f"Dest: {p.dst}:{p.dport}",
                 f"Length: {p.length} bytes",
             ]
-            if info:
-                # Word-wrap info: max 60 chars per line
-                max_chars = 60
-                while len(info) > max_chars:
-                    lines.append("Info: " + info[:max_chars])
-                    info = info[max_chars:]
-                if info:
-                    lines.append("Info: " + info)
+            info_offset = getattr(self, 'detail_info_offset', 0)
+            # Show 1000-char window from full info
+            if info_len > 1000:
+                lines.append("Info: " + info[info_offset:info_offset + 1000])
+            elif info:
+                lines.append("Info: " + info)
+            # Scroll indicator
+            if info_len > 1000:
+                lines.append(f"↑↓ Scroll ({info_offset}-{info_offset + 1000}/{info_len})")
             # Max size: 50% of screen
             max_w = max(200, self.w // 2)
             max_h = max(150, self.h // 2)
             line_h = 16
             w = min(400, max_w)
-            # Wrap lines to fit width
+            # Wrap lines to fit width (chunk-based, not char-by-char)
             wrapped_lines = []
             for line in lines:
                 while len(line) > 0:
-                    # Find max chars that fit
-                    test_len = len(line)
-                    while self.font.size(line[:test_len])[0] > w - 20 and test_len > 0:
-                        test_len -= 1
-                    if test_len == 0:
-                        test_len = len(line)
-                    wrapped_lines.append(line[:test_len])
-                    line = line[test_len:]
+                    # Binary search for max chars that fit
+                    lo, hi = 0, min(len(line), 200)
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        if self.small.size(line[:mid])[0] <= w - 20:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    if lo == 0:
+                        lo = 1
+                    wrapped_lines.append(line[:lo])
+                    line = line[lo:]
             h = min(30 + len(wrapped_lines) * line_h, max_h)
             x = min(mx + 15, self.w - w - 10)
             y = min(my + 15, self.h - h - 10)
@@ -1375,6 +1382,7 @@ class App:
             self.screen.blit(surf, (x, y))
         else:
             self.detail_hover_packet = None
+            self.detail_info_offset = 0
 
         # Scrollbar
         if max_scroll > 0:
@@ -1459,6 +1467,17 @@ class App:
                     self.detail_view = False
                     self.selected_node = None
                     self.detail_node = None
+                elif self.detail_view:
+                    # Arrow key scrolling for info text
+                    src = self.detail_hover_packet or getattr(self, '_last_detail_packet', None)
+                    if src:
+                        info = src.payload or src.info or ""
+                        info = " ".join(info.replace("\r", " ").replace("\n", " ").split())
+                        max_offset = max(0, len(info) - 1000)
+                        if ev.key == pygame.K_DOWN:
+                            self.detail_info_offset = min(max_offset, self.detail_info_offset + 500)
+                        elif ev.key == pygame.K_UP:
+                            self.detail_info_offset = max(0, self.detail_info_offset - 500)
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if self.detail_view:
                     # In detail view, only Q exits.
