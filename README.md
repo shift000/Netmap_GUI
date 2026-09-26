@@ -2,6 +2,8 @@
 
 Echtzeit-Netzwerkkarten-Visualisierung mit TShark und Pygame. Zeigt IP-Verbindungen als Kraft-gerichteten Graphen, gruppiert nach Protokoll.
 
+![Netmap GUI Screenshot](netmap_v1.0.png)
+
 ## Installation
 
 ```bash
@@ -37,6 +39,7 @@ pip install -r requirements.txt
 | F | Text-Filter |
 | P | Protokoll-Filter |
 | I | IP-Version wechseln (ALL→IPv4→IPv6) |
+| D | DNS-Namensauflösung ein/aus |
 | ESC | Beenden |
 
 Maus: Hover über Kante zeigt Payload-Daten, Scrollrad navigiert History.
