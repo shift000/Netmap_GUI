@@ -1,0 +1,29 @@
+{
+  "tshark_path": "/usr/bin/tshark",
+  "interface": "",
+  "window": {
+    "width": 1500,
+    "height": 950,
+    "fps": 60
+  },
+  "retention_seconds": 20,
+  "max_packets_per_edge": 80,
+  "payload_max_chars": 300,
+  "node_radius": 42,
+  "layout": {
+    "repulsion": 65000.0,
+    "spring": 0.0022,
+    "spring_length": 260.0,
+    "damping": 0.84
+  },
+  "protocol_colors": {
+    "TCP": [70, 160, 255],
+    "UDP": [90, 220, 120],
+    "ICMP": [255, 190, 70],
+    "DNS": [190, 110, 255],
+    "HTTP": [255, 90, 90],
+    "TLS": [80, 220, 220],
+    "ARP": [255, 140, 210],
+    "DHCP": [240, 240, 100]
+  }
+}
