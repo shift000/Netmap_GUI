@@ -6,11 +6,11 @@ Real-time network map visualization using TShark and Pygame. Displays IP connect
 
 **NodeView** (default) — Force-directed graph showing all active IPs as nodes and their connections as colored edges (one line per protocol).
 
-![NodeView](netmap_v1.0.png)
+![NodeView](netmap_nodeView.png)
 
 **DetailedView** — Click two nodes to inspect all traffic between them: packet timestamps, protocols, ports, and decoded payload data.
 
-![DetailedView](netmap_detailed_v1.0.png)
+![DetailedView](netmap_detailedView.png)
 
 ## Installation
 
