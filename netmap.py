@@ -163,7 +163,7 @@ class Capture:
                 bufsize=1,
             )
         except Exception as exc:
-            self.q.put(("error", f"TShark konnte nicht gestartet werden: {exc}"))
+            self.q.put(("error", f"TShark could not be started: {exc}"))
             return
 
         threading.Thread(
@@ -432,19 +432,22 @@ class App:
         self.drawn_curves = []  # [(points, edge), ...] für Hover-Erkennung
         self._rng = random.Random()  # Thread-sicheres RNG für Node-Positionen
         self.mac_to_ip = {}  # MAC -> kanonische IP (erste bekannte)
-        self.ip_aliases = collections.defaultdict(set)  # IP -> weitere bekannte IPs dieses Hosts
+        self.ip_aliases = collections.defaultdict(set)  # IP -> other known IPs of this host
+        self.selected_node = None  # Für Node-Klick-Detailansicht
+        self.detail_node = None  # second node in detail view
+        self.detail_view = False  # True when detail view is active
         self.capture.start()
         
     def grouped_edges(self):
         """
-        Gruppiert alle Edge-Objekte nach:
-            Quelle -> Ziel -> Protokoll
+        Groups all Edge objects by:
+            Source -> Destination -> Protocol
 
-        Mehrere Ports/Verbindungen desselben Protokolls
-        werden dadurch zu einer visuellen Linie zusammengefasst.
+        Multiple ports/connections of the same protocol
+        are merged into a single visual line.
 
-        Gegenrichtungen (A->B und B->A) bleiben separat,
-        damit draw_grouped_edges() sie auseinanderlegen kann.
+        Opposite directions (A->B and B->A) stay separate,
+        so draw_grouped_edges() can spread them apart.
         """
         groups = {}
 
@@ -940,6 +943,12 @@ class App:
                 s2 = self.small.render(name[:28], True, (165, 175, 188))
                 self.screen.blit(s2, s2.get_rect(center=(n.x, n.y + 12)))
 
+        # Selection highlight.
+        if self.selected_node and self.selected_node in self.nodes:
+            n = self.nodes[self.selected_node]
+            r = self.node_radius(self.selected_node)
+            pygame.draw.circle(self.screen, (80, 200, 255), (int(n.x), int(n.y)), r + 6, 2)
+
         self.draw_hud()
         self.draw_stats()
 
@@ -950,6 +959,32 @@ class App:
             self.draw_help()
 
         self.draw_legend()
+
+        if self.detail_view:
+            self.draw_detail_view()
+            pygame.display.flip()
+            return
+
+        # Activity indicator: radar sweep bottom-left.
+        cx, cy = 18, self.h - 18
+        t = time.time()
+        # Static center dot
+        pygame.draw.circle(self.screen, (80, 255, 120), (cx, cy), 4)
+        # Rotating sweep arm
+        angle = t * 2.5  # revolutions per second
+        sweep_len = 14
+        end_x = cx + math.cos(angle) * sweep_len
+        end_y = cy - math.sin(angle) * sweep_len
+        # Draw sweep trail (fading arc effect via multiple segments)
+        for i in range(1, 9):
+            frac = i / 9.0
+            a = angle - frac * 0.5
+            alpha = int(200 * (1 - frac))
+            ex = cx + math.cos(a) * sweep_len
+            ey = cy - math.sin(a) * sweep_len
+            col = (80, 255, 120, alpha) if hasattr(pygame, 'Color') else (80, 255, 120)
+            pygame.draw.line(self.screen, col, (cx, cy), (ex, ey), 1)
+        pygame.draw.line(self.screen, (80, 255, 120), (cx, cy), (end_x, end_y), 2)
 
         pygame.display.flip()
 
@@ -1032,14 +1067,14 @@ class App:
             self.save_feedback = ""
 
     def draw_legend(self):
-        # Zeigt alle definierten Protokoll-Farben aus DEFAULT_CONFIG.
+        # Shows all defined protocol colors from DEFAULT_CONFIG.
         colors = self.cfg.get("protocol_colors", {})
         protos = sorted(colors.keys())
 
         x = self.w - 12
         y = self.h - 25
 
-        # Von rechts nach links zeichnen.
+        # Draw right to left.
         for p in reversed(protos):
             col = tuple(colors[p])
             s = self.small.render(p, True, (195, 200, 210))
@@ -1055,18 +1090,20 @@ class App:
 
     def draw_help(self):
         lines = [
-            "F = Textfilter setzen, ENTER anwenden, BACKSPACE löschen",
-            "P = Protokollfilter (z.B. TCP, DNS, TLS), ENTER anwenden",
-            "O = Port-Filter (z.B. 443, 80), ENTER anwenden",
-            "I = IP-Filter umschalten (ALL → IPv4 → IPv6 → ALL)",
-            "D = DNS-Namensauflösung ein/aus",
-            "S = Statistik-Panel ein/aus",
-            "E = Screenshot speichern",
-            "Maus über Verbindung = Paket-/Payload-Verlauf",
-            "Mausrad über Payload = Verlauf scrollen",
-            "SPACE = Capture pausieren, C = Ansicht leeren",
+            "F = Set text filter, ENTER to apply, BACKSPACE to delete",
+            "P = Protocol filter (e.g. TCP, DNS, TLS), ENTER to apply",
+            "O = Port filter (e.g. 443, 80), ENTER to apply",
+            "I = Toggle IP filter (ALL → IPv4 → IPv6 → ALL)",
+            "D = DNS name resolution on/off",
+            "S = Statistics panel on/off",
+            "E = Save screenshot",
+            "Click node = Select, Click second node = Detail view",
+            "Q = Exit detail view, Click empty = Deselect",
+            "Mouse over connection = Packet/Payload history",
+            "Scroll wheel on payload = Scroll history",
+            "SPACE = Pause capture, C = Clear view",
         ]
-        w, h = 570, 300
+        w, h = 570, 340
         x, y = (self.w - w) // 2, (self.h - h) // 2
         s = pygame.Surface((w, h), pygame.SRCALPHA)
         s.fill((8, 10, 14, 245))
@@ -1129,6 +1166,224 @@ class App:
 
         self.screen.blit(surf, (x, y))
 
+    def node_at(self, mx, my):
+        """Return node IP at mouse position, or None."""
+        for ip, n in self.nodes.items():
+            r = self.node_radius(ip)
+            dx, dy = mx - n.x, my - n.y
+            if dx * dx + dy * dy <= r * r:
+                return ip
+        return None
+
+    def draw_detail_view(self):
+        """Detail view: sequence diagram style showing individual packets between two nodes."""
+        if not self.detail_view or not self.selected_node or not self.detail_node:
+            return
+
+        n1, n2 = self.selected_node, self.detail_node
+
+        # Full-screen dark overlay
+        overlay = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
+        overlay.fill((8, 10, 14, 245))
+        self.screen.blit(overlay, (0, 0))
+
+        # Title
+        title = f"{n1}  ↔  {n2}"
+        ts = self.font.render(title, True, (235, 240, 245))
+        self.screen.blit(ts, ts.get_rect(center=(self.w // 2, 30)))
+
+        sub = self.small.render("Q = Back   |   Scroll with mouse wheel   |   Click to select", True, (140, 155, 170))
+        self.screen.blit(sub, sub.get_rect(center=(self.w // 2, 55)))
+
+        # Collect all packets between these two nodes (both directions).
+        all_packets = []
+        for e in self.edges.values():
+            if e.src == n1 and e.dst == n2:
+                for p in e.packets:
+                    all_packets.append((p, n1, n2))  # forward
+            elif e.src == n2 and e.dst == n1:
+                for p in e.packets:
+                    all_packets.append((p, n2, n1))  # reversed for display
+
+        # Sort chronologically
+        all_packets.sort(key=lambda x: x[0].ts)
+
+        # Column positions for nodes
+        margin = 100
+        col1 = margin
+        col2 = self.w - margin
+        header_y = 90
+        row_h = 18
+        spacing = 2
+
+        # Draw vertical lines (lifelines)
+        pygame.draw.line(self.screen, (60, 70, 90), (col1, header_y), (col1, self.h - 40), 2)
+        pygame.draw.line(self.screen, (60, 70, 90), (col2, header_y), (col2, self.h - 40), 2)
+
+        # Node labels at top
+        l1 = self.bold.render(n1[:20], True, (200, 220, 255))
+        l2 = self.bold.render(n2[:20], True, (200, 220, 255))
+        self.screen.blit(l1, l1.get_rect(center=(col1, header_y - 20)))
+        self.screen.blit(l2, l2.get_rect(center=(col2, header_y - 20)))
+
+        if not all_packets:
+            empty = self.small.render("No traffic recorded between these nodes yet", True, (120, 130, 150))
+            self.screen.blit(empty, empty.get_rect(center=(self.w // 2, self.h // 2)))
+            return
+
+        # Scroll offset (stored per-instance)
+        if not hasattr(self, 'detail_scroll'):
+            self.detail_scroll = 0
+            self.detail_last_count = 0
+        max_scroll = max(0, len(all_packets) * (row_h + spacing) - (self.h - header_y - 80))
+        # Auto-scroll to bottom if new packets arrived and we're already at bottom
+        if len(all_packets) > self.detail_last_count:
+            if self.detail_scroll >= max_scroll - 10 or self.detail_last_count == 0:
+                self.detail_scroll = max_scroll
+            self.detail_last_count = len(all_packets)
+        self.detail_scroll = max(0, min(max_scroll, self.detail_scroll))
+
+        # Draw column headers
+        self.screen.blit(self.small.render("TIME", True, (140, 155, 170)), (col1, header_y + 5))
+        self.screen.blit(self.small.render("→", True, (140, 155, 170)), (col1 + 70, header_y + 5))
+        mid = self.w // 2 - 30
+        self.screen.blit(self.small.render("INFO", True, (140, 155, 170)), (mid, header_y + 5))
+        self.screen.blit(self.small.render("←", True, (140, 155, 170)), (col2 - 70, header_y + 5))
+        self.screen.blit(self.small.render("PORT", True, (140, 155, 170)), (col2 + 5, header_y + 5))
+
+        y_base = header_y + 30
+        visible_start = max(0, self.detail_scroll // (row_h + spacing))
+        self.detail_hover_packet = None  # Reset each frame
+
+        for idx, (p, src, dst) in enumerate(all_packets):
+            # Advance y even for skipped items so visible items align correctly
+            y = y_base - self.detail_scroll + idx * (row_h + spacing)
+            if y < header_y + 30:
+                continue
+            if y > self.h - 50:
+                break
+
+            is_fwd = (src == n1)
+            col = self.color(p.protocol)
+
+            # Background row (alternating) - MUST be drawn FIRST
+            if idx % 2 == 0:
+                pygame.draw.rect(self.screen, (15, 18, 25), (col1 + 3, y, col2 - col1 - 6, row_h))
+
+            # Direction arrow
+            arrow = "→" if is_fwd else "←"
+            arrow_col = (100, 220, 120) if is_fwd else (220, 100, 100)
+            arr_surf = self.small.render(arrow, True, arrow_col)
+            self.screen.blit(arr_surf, (col1 + 70, y))
+
+            # Timestamp
+            ts_str = time.strftime("%H:%M:%S", time.localtime(p.ts))
+            ms = int((p.ts % 1) * 1000)
+            ts_full = f"{ts_str}.{ms:03d}"
+            self.screen.blit(self.small.render(ts_full, True, (180, 185, 200)), (col1 + 5, y))
+
+            # Info/payload (truncated to fixed length)
+            info = p.payload or p.info or ""
+            info = " ".join(info.replace("\r", " ").replace("\n", " ").split())
+            max_info_len = 50
+            if len(info) > max_info_len:
+                info = info[:max_info_len - 3] + "..."
+            info_col = (210, 215, 225)
+            info_surf = self.small.render(info, True, info_col)
+            # Place info centered between the two columns
+            info_x = col1 + (col2 - col1) // 2 - info_surf.get_width() // 2
+            self.screen.blit(info_surf, (info_x, y))
+
+            # Port on left side: n1's port in this direction
+            # fwd=True: n1 sends → sport (source)
+            # fwd=False: n1 receives ← dport (destination)
+            port_left = f":{p.sport}" if is_fwd else f":{p.dport}"
+            self.screen.blit(self.small.render(port_left, True, (160, 165, 180)), (col1 - 60, y))
+
+            # Port on right side: n2's port in this direction
+            # fwd=True: n2 receives → dport (destination)
+            # fwd=False: n2 sends → sport (source)
+            port_right = f":{p.dport}" if is_fwd else f":{p.sport}"
+            self.screen.blit(self.small.render(port_right, True, (160, 165, 180)), (col2 + 5, y))
+
+            # Small protocol indicator (symmetric on both sides)
+            proto_surf = self.small.render(p.protocol[:4], True, (10, 10, 10))
+            if is_fwd:
+                # Left side: after arrow
+                bg_x = col1 + 95
+                txt_x = col1 + 97
+            else:
+                # Right side: before port, symmetric with left
+                bg_x = col2 - proto_surf.get_width() - 9
+                txt_x = col2 - proto_surf.get_width() - 7
+            pygame.draw.rect(self.screen, col, (bg_x, y + 2, proto_surf.get_width() + 4, row_h - 4))
+            self.screen.blit(proto_surf, (txt_x, y + 4))
+
+            # Hover detection: store packet for popup
+            mx, my = pygame.mouse.get_pos()
+            row_top = y
+            row_bottom = y + row_h
+            if col1 + 3 <= mx <= col2 - 3 and row_top <= my <= row_bottom:
+                self.detail_hover_packet = p
+
+        # Draw hover popup for detail view only if hovering over a row
+        if hasattr(self, 'detail_hover_packet') and self.detail_hover_packet:
+            p = self.detail_hover_packet
+            mx, my = pygame.mouse.get_pos()
+            info = p.payload or p.info or ""
+            info = " ".join(info.replace("\r", " ").replace("\n", " ").split())
+            lines = [
+                f"Time: {time.strftime('%H:%M:%S', time.localtime(p.ts))}.{int((p.ts % 1) * 1000):03d}",
+                f"Protocol: {p.protocol}",
+                f"Source: {p.src}:{p.sport}",
+                f"Dest: {p.dst}:{p.dport}",
+                f"Length: {p.length} bytes",
+            ]
+            if info:
+                # Word-wrap info: max 60 chars per line
+                max_chars = 60
+                while len(info) > max_chars:
+                    lines.append("Info: " + info[:max_chars])
+                    info = info[max_chars:]
+                if info:
+                    lines.append("Info: " + info)
+            # Max size: 50% of screen
+            max_w = max(200, self.w // 2)
+            max_h = max(150, self.h // 2)
+            line_h = 16
+            w = min(400, max_w)
+            # Wrap lines to fit width
+            wrapped_lines = []
+            for line in lines:
+                while len(line) > 0:
+                    # Find max chars that fit
+                    test_len = len(line)
+                    while self.font.size(line[:test_len])[0] > w - 20 and test_len > 0:
+                        test_len -= 1
+                    if test_len == 0:
+                        test_len = len(line)
+                    wrapped_lines.append(line[:test_len])
+                    line = line[test_len:]
+            h = min(30 + len(wrapped_lines) * line_h, max_h)
+            x = min(mx + 15, self.w - w - 10)
+            y = min(my + 15, self.h - h - 10)
+            surf = pygame.Surface((w, h), pygame.SRCALPHA)
+            surf.fill((8, 10, 14, 240))
+            pygame.draw.rect(surf, self.color(p.protocol), surf.get_rect(), 2)
+            for i, line in enumerate(wrapped_lines):
+                surf.blit(self.small.render(line, True, (205, 212, 220)), (10, 10 + i * 16))
+            self.screen.blit(surf, (x, y))
+        else:
+            self.detail_hover_packet = None
+
+        # Scrollbar
+        if max_scroll > 0:
+            bar_h_total = self.h - header_y - 80
+            thumb_h = max(30, int(bar_h_total * (1 - max_scroll / max(1, len(all_packets) * (row_h + spacing)))))
+            thumb_y = header_y + 30 + int(bar_h_total * self.detail_scroll / max_scroll)
+            pygame.draw.rect(self.screen, (40, 45, 55), (self.w - 15, header_y + 30, 8, bar_h_total))
+            pygame.draw.rect(self.screen, (80, 90, 110), (self.w - 15, thumb_y, 8, thumb_h))
+
     def color(self, protocol):
         if protocol in self.cfg["protocol_colors"]:
             return tuple(self.cfg["protocol_colors"][protocol])
@@ -1187,7 +1442,7 @@ class App:
                 elif ev.key == pygame.K_f:
                     self.filter_text = self.text_input("Filter")
                 elif ev.key == pygame.K_p:
-                    self.filter_proto = self.text_input("Protokoll").upper()
+                    self.filter_proto = self.text_input("Protocol").upper()
                 elif ev.key == pygame.K_o:
                     self.port_filter = self.text_input("Port")
                 elif ev.key == pygame.K_i:
@@ -1200,29 +1455,54 @@ class App:
                     fname = f"netmap_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                     pygame.image.save(self.screen, fname)
                     self.save_feedback = fname
+                elif ev.key == pygame.K_q and self.detail_view:
+                    self.detail_view = False
+                    self.selected_node = None
+                    self.detail_node = None
+            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                if self.detail_view:
+                    # In detail view, only Q exits.
+                    pass
+                else:
+                    clicked = self.node_at(*ev.pos)
+                    if clicked:
+                        if self.selected_node is None:
+                            self.selected_node = clicked
+                        elif self.selected_node == clicked:
+                            self.selected_node = None
+                        else:
+                            self.detail_node = clicked
+                            self.detail_view = True
+                    else:
+                        self.selected_node = None
             elif ev.type == pygame.MOUSEWHEEL and self.hover_edge:
                 self.payload_scroll = max(
                     -len(self.hover_edge.packets) + 1,
                     min(0, self.payload_scroll + ev.y)
                 )
+            elif ev.type == pygame.MOUSEWHEEL and self.detail_view:
+                self.detail_scroll = max(0, self.detail_scroll + ev.y * 30)
 
     def text_input(self, title):
         value = ""
         old = self.show_help
         self.show_help = False
         while True:
-            for ev in pygame.event.get():
-                if ev.type == pygame.KEYDOWN:
-                    if ev.key == pygame.K_RETURN:
-                        self.show_help = old
-                        return value
-                    if ev.key == pygame.K_ESCAPE:
-                        self.show_help = old
-                        return ""
-                    if ev.key == pygame.K_BACKSPACE:
-                        value = value[:-1]
-                    elif ev.unicode and ev.unicode.isprintable():
-                        value += ev.unicode
+            ev = pygame.event.wait()
+            if ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_RETURN:
+                    self.show_help = old
+                    return value
+                if ev.key == pygame.K_ESCAPE:
+                    self.show_help = old
+                    return ""
+                if ev.key == pygame.K_BACKSPACE:
+                    value = value[:-1]
+                elif ev.unicode and ev.unicode.isprintable():
+                    value += ev.unicode
+            elif ev.type == pygame.QUIT:
+                self.show_help = old
+                return ""
             self.screen.fill((11, 14, 19))
             txt = self.font.render(f"{title}: {value}_", True, (235, 240, 245))
             self.screen.blit(txt, (30, 30))
@@ -1257,14 +1537,14 @@ class App:
 def choose_interface(tshark):
     items = interfaces(tshark)
     if not items:
-        raise RuntimeError("TShark meldet keine Interfaces. TShark-Berechtigungen prüfen.")
+        raise RuntimeError("TShark reports no interfaces. Check TShark permissions.")
 
-    print("\nVerfügbare Interfaces:")
+    print("\nAvailable interfaces:")
     for num, name in items:
         print(f"  {num}: {name}")
 
     while True:
-        choice = input("\nInterface auswählen (Nummer oder Name): ").strip()
+        choice = input("\nSelect interface (number or name): ").strip()
         for num, name in items:
             if choice == num or choice == name:
                 # tshark accepts either its numeric interface id or its name.
@@ -1284,10 +1564,11 @@ def main():
     if not Path(tshark).exists():
         tshark = shutil.which("tshark") or tshark
     if not shutil.which(tshark) and not Path(tshark).exists():
-        raise SystemExit("TShark nicht gefunden. tshark_path in config.json setzen.")
+        raise SystemExit("TShark not found. Set tshark_path in config.json.")
 
     interface = cfg.get("interface") or choose_interface(tshark)
 
+    pygame.mixer.quit()  # Prevent ALSA errors - we don't need audio
     pygame.init()
     try:
         App(cfg, interface).run()

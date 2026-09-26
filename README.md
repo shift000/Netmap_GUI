@@ -1,58 +1,64 @@
 # Netmap GUI
 
-Echtzeit-Netzwerkkarten-Visualisierung mit TShark und Pygame. Zeigt IP-Verbindungen als Kraft-gerichteten Graphen, gruppiert nach Protokoll.
+Real-time network map visualization using TShark and Pygame. Displays IP connections as a force-directed graph grouped by protocol.
 
-![Netmap GUI Screenshot](netmap_v1.0.png)
+## Views
+
+**NodeView** (default) — Force-directed graph showing all active IPs as nodes and their connections as colored edges (one line per protocol).
+
+![NodeView](netmap_v1.0.png)
+
+**DetailedView** — Click two nodes to inspect all traffic between them: packet timestamps, protocols, ports, and decoded payload data.
+
+![DetailedView](netmap_detailed_v1.0.png)
 
 ## Installation
 
 ```bash
-# 1. Systemabhängigkeiten installieren (TShark für Packet-Capture)
+# 1. Install system dependencies (TShark for packet capture)
 sudo apt install tshark
 
-# 2. Virtual Environment erstellen
+# 2. Create virtual environment
 python3 -m venv .venv
 
-# 3. Python-Abhängigkeiten installieren
+# 3. Install Python dependencies
 .venv/bin/pip install pygame
 
-# 4. Starten (sudo wegen Packet-Capture)
+# 4. Run (sudo required for packet capture)
 sudo .venv/bin/python netmap.py
 sudo .venv/bin/python netmap.py --config config.json
 ```
 
 ## Installation (requirements.txt)
 
-Mit `requirements.txt`:
-
 ```bash
 pip install -r requirements.txt
 ```
 
-## Steuerung
+## Controls
 
-| Taste | Funktion |
-|-------|----------|
+| Key | Function |
+|-----|----------|
 | SPACE | Pause/Resume |
-| C | Ansicht leeren |
-| H | Hilfe anzeigen |
-| F | Text-Filter |
-| P | Protokoll-Filter |
-| O | Port-Filter (z.B. 443, 80) |
-| I | IP-Version wechseln (ALL→IPv4→IPv6) |
-| D | DNS-Namensauflösung ein/aus |
-| S | Statistik-Panel ein/aus |
-| E | Screenshot speichern |
-| ESC | Beenden |
+| C | Clear view |
+| H | Show help |
+| F | Text filter |
+| P | Protocol filter |
+| O | Port filter (e.g. 443, 80) |
+| I | IP version (ALL→IPv4→IPv6) |
+| D | DNS resolution on/off |
+| S | Statistics panel on/off |
+| E | Save screenshot |
+| ESC | Quit |
 
-Maus: Hover über Kante zeigt Payload-Daten, Scrollrad navigiert History.
+**Mouse:** Hover over connection to see payload data. Click two nodes to switch to DetailedView. Scroll wheel navigates history.
 
-## Konfiguration
+## Configuration
 
-`config.json` anpassen für:
-- Fenstergröße, FPS
-- Layout-Physik (Repulsion, Spring, Damping)
-- Node-Größe und Retention-Zeit
-- Protokoll-Farben
+Adjust `config.json` for:
+- Window size, FPS
+- Layout physics (Repulsion, Spring, Damping)
+- Node size and retention time
+- Protocol colors
 
-Siehe `DEFAULT_CONFIG` in [netmap.py](netmap.py) für alle Optionen.
+See `DEFAULT_CONFIG` in [netmap.py](netmap.py) for all options.
