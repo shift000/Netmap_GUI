@@ -6,7 +6,7 @@
     "height": 950,
     "fps": 60
   },
-  "retention_seconds": 20,
+  "retention_seconds": 120,
   "max_packets_per_edge": 80,
   "payload_max_chars": 300,
   "node_radius": 42,
