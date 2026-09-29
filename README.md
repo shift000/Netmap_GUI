@@ -12,6 +12,10 @@ Real-time network map visualization using TShark and Pygame. Displays IP connect
 
 ![DetailedView](netmap_detailedView.png)
 
+## Screenshoots
+![NodeView](netmap_nmapScan.png)
+nmap-scan
+
 ## Installation
 
 ```bash
